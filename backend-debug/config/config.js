@@ -2,6 +2,8 @@
  * Configuração do backend de debug
  */
 
+const path = require("path");
+
 module.exports = {
 	server: {
 		port: process.env.PORT || 8080,
@@ -26,6 +28,11 @@ module.exports = {
 	debug: {
 		verbose: process.env.DEBUG === "true",
 		logLevel: process.env.LOG_LEVEL || "info",
+	},
+
+	paths: {
+		public: path.join(__dirname, "../public"),
+		index: path.join(__dirname, "../public/index.html"),
 	},
 
 	// Comandos permitidos por plataforma

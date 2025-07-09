@@ -2,6 +2,8 @@
 
 Backend simples para desenvolvimento e debug do agente de monitoramento.
 
+> **✨ Refatorado**: Agora com estrutura modular para melhor organização e manutenibilidade!
+
 ## 🚀 Instalação e Uso
 
 ### Pré-requisitos
@@ -22,6 +24,20 @@ npm run dev
 ```
 
 O servidor estará disponível em: http://localhost:8080
+
+## 🏗️ Estrutura Modular
+
+O backend foi refatorado com separação de responsabilidades:
+
+- **config/** - Configurações centralizadas
+- **utils/** - Utilitários (logger)
+- **middleware/** - Middleware de autenticação
+- **storage/** - Storage em memória
+- **routes/** - Rotas organizadas por funcionalidade
+- **websocket/** - Handler do WebSocket
+- **public/** - Interface web
+
+📖 Veja `STRUCTURE.md` para detalhes completos da arquitetura.
 
 ## 📋 Funcionalidades
 
