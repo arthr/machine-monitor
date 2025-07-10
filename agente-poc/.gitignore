@@ -1,5 +1,5 @@
 # Binários
-agente
+/agente
 *.exe
 *.exe~
 *.dll
