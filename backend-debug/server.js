@@ -21,7 +21,9 @@ const app = express();
 // ==================== MIDDLEWARE ====================
 
 app.use(cors());
-app.use(express.json());
+// Aumentar limite do body-parser para aceitar inventários grandes
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.use(express.static(config.paths.public));
 
 // ==================== ROTAS ====================

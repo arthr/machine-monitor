@@ -259,9 +259,9 @@
                         <div class="machine-header">
                             <h3>${machine.hostname || machine.id}</h3>
                             <div class="machine-status">
-                                <span class="status-${
-									machine.status
-								}">${machine.status.toUpperCase()}</span>
+                                <span class="status-${machine.status}">${
+								machine.status
+							}</span>
                                 <div class="ws-indicator" title="WebSocket"></div>
                             </div>
                         </div>
@@ -271,6 +271,61 @@
 								machine.last_seen
 							).toLocaleString()}
                         </p>
+                        ${
+							machine.platform
+								? `<p><strong>Plataforma:</strong> ${
+										machine.platform
+								  } ${machine.architecture || ""}</p>`
+								: ""
+						}
+                        ${
+							machine.agent_version
+								? `<p><strong>Agente:</strong> v${machine.agent_version}</p>`
+								: ""
+						}
+                        ${
+							machine.applications_count
+								? `<p><strong>Apps:</strong> ${
+										machine.applications_count
+								  } | <strong>Processos:</strong> ${
+										machine.processes_count || 0
+								  } | <strong>Serviços:</strong> ${
+										machine.services_count || 0
+								  }</p>`
+								: ""
+						}
+                        ${
+							machine.system_health
+								? `
+                            <div style="margin: 10px 0; padding: 10px; background: #f8f9fa; border-radius: 4px;">
+                                <strong>Sistema:</strong> ${
+									machine.system_health.status || "N/A"
+								} | 
+                                <strong>CPU:</strong> ${
+									machine.system_health.cpu_usage_percent
+										? machine.system_health.cpu_usage_percent.toFixed(
+												1
+										  ) + "%"
+										: "N/A"
+								} | 
+                                <strong>RAM:</strong> ${
+									machine.system_health.memory_usage_percent
+										? machine.system_health.memory_usage_percent.toFixed(
+												1
+										  ) + "%"
+										: "N/A"
+								} | 
+                                <strong>Disco:</strong> ${
+									machine.system_health.disk_usage_percent
+										? machine.system_health.disk_usage_percent.toFixed(
+												1
+										  ) + "%"
+										: "N/A"
+								}
+                            </div>
+                        `
+								: ""
+						}
                         <div style="margin: 10px 0;">
                             <select class="command-select" id="cmd-${
 								machine.id
