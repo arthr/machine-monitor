@@ -1,0 +1,56 @@
+# Binários
+agente
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Arquivos de test
+*.test
+
+# Arquivos de output do go build
+*.out
+
+# Arquivos de dependências
+go.sum
+
+# Arquivos de configuração locais
+configs/local.json
+configs/production.json
+
+# Logs
+*.log
+logs/
+
+# Arquivos temporários
+tmp/
+temp/
+
+# Arquivos do IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Arquivos do sistema
+.DS_Store
+Thumbs.db
+
+# Arquivos de backup
+*.bak
+*.backup
+
+# Arquivos de profiling
+*.prof
+
+# Coverage
+coverage.out
+coverage.html
+
+# Vendor (se usado)
+vendor/
+
+# Arquivos específicos do ambiente
+.env
+.env.local 

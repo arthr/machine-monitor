@@ -1,0 +1,15 @@
+{
+  "machine_id": "mac-dev-001",
+  "backend_url": "http://localhost:3000",
+  "websocket_url": "ws://localhost:3000/ws",
+  "token": "dev-token-123",
+  "heartbeat_interval": 30,
+  "collection_interval": 60,
+  "inventory_interval": 300,
+  "command_timeout": 30,
+  "retry_interval": 5,
+  "reconnect_interval": 5,
+  "max_retries": 3,
+  "log_level": "debug",
+  "debug": true
+} 
