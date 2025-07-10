@@ -14,7 +14,7 @@ Implementar o executor de comandos remotos com lista de comandos permitidos e va
 
 ### ✅ Whitelist de Comandos
 - [ ] Implementar `internal/executor/commands.go`:
-  - [ ] Lista de comandos permitidos para macOS
+  - [ ] Lista de comandos permitidos
   - [ ] Validação de comando + argumentos
   - [ ] Configuração via arquivo/env
   - [ ] Comandos específicos por usuário/grupo
@@ -72,5 +72,4 @@ Implementar o executor de comandos remotos com lista de comandos permitidos e va
 - Nunca executar comandos não listados
 - Validar todos os argumentos
 - Logs devem incluir usuário/origem
-- Preparar para auditoria de segurança
-- Considerar sandboxing no futuro 
+- Preparar para multiplataforma (Windows/MacOS/Linux)

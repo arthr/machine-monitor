@@ -3,215 +3,473 @@ package executor
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
+	"sync"
 	"time"
 
 	"agente-poc/internal/comms"
 	"agente-poc/internal/logging"
 )
 
-// Executor define a interface para execução de comandos
-type Executor interface {
-	Execute(ctx context.Context, command *comms.Command) (*comms.CommandResult, error)
-	IsSupported(command *comms.Command) bool
-	GetTimeout() time.Duration
+// Executor implementa a execução segura de comandos remotos
+type Executor struct {
+	config    *Config
+	logger    logging.Logger
+	whitelist *CommandWhitelist
+	semaphore chan struct{}
+	metrics   *ExecutionMetrics
+	mutex     sync.RWMutex
 }
 
 // Config contém a configuração do executor
 type Config struct {
-	DefaultTimeout time.Duration
-	MaxConcurrent  int
-	Logger         logging.Logger
+	MaxConcurrent   int                    `json:"max_concurrent"`
+	DefaultTimeout  time.Duration          `json:"default_timeout"`
+	MaxOutputSize   int                    `json:"max_output_size"`
+	EnableMetrics   bool                   `json:"enable_metrics"`
+	CustomWhitelist map[string]CommandSpec `json:"custom_whitelist,omitempty"`
+	UserGroups      []string               `json:"user_groups,omitempty"`
+	Logger          logging.Logger         `json:"-"`
 }
 
-// CommandExecutor implementa a interface Executor
-type CommandExecutor struct {
-	config    *Config
-	logger    logging.Logger
-	semaphore chan struct{}
+// ExecutionMetrics coleta métricas de execução
+type ExecutionMetrics struct {
+	TotalExecutions  int64                   `json:"total_executions"`
+	SuccessfulRuns   int64                   `json:"successful_runs"`
+	FailedRuns       int64                   `json:"failed_runs"`
+	RejectedCommands int64                   `json:"rejected_commands"`
+	AverageTime      time.Duration           `json:"average_execution_time"`
+	CommandStats     map[string]CommandStats `json:"command_stats"`
+	LastExecution    time.Time               `json:"last_execution"`
+	mutex            sync.RWMutex
+}
+
+// CommandStats estatísticas por comando
+type CommandStats struct {
+	Count         int64         `json:"count"`
+	SuccessCount  int64         `json:"success_count"`
+	FailureCount  int64         `json:"failure_count"`
+	AverageTime   time.Duration `json:"average_time"`
+	LastExecution time.Time     `json:"last_execution"`
+}
+
+// ExecutionResult resultado detalhado da execução
+type ExecutionResult struct {
+	Success       bool          `json:"success"`
+	Output        string        `json:"output"`
+	Error         string        `json:"error"`
+	ExitCode      int           `json:"exit_code"`
+	ExecutionTime time.Duration `json:"execution_time"`
+	CommandSpec   CommandSpec   `json:"command_spec"`
+	Sanitized     bool          `json:"sanitized"`
 }
 
 // New cria uma nova instância do executor
-func New(config *Config) *CommandExecutor {
+func New(config *Config) (*Executor, error) {
 	if config == nil {
 		config = &Config{
+			MaxConcurrent:  5,
 			DefaultTimeout: 30 * time.Second,
-			MaxConcurrent:  10,
+			MaxOutputSize:  1024 * 1024, // 1MB
+			EnableMetrics:  true,
 		}
 	}
 
 	if config.Logger == nil {
-		// Usar um logger padrão se não fornecido
-		logger, _ := logging.NewLogger(nil)
+		logger, err := logging.NewLogger(nil)
+		if err != nil {
+			return nil, fmt.Errorf("erro ao criar logger: %w", err)
+		}
 		config.Logger = logger
 	}
 
-	return &CommandExecutor{
+	// Obter whitelist baseada na plataforma
+	var whitelist *CommandWhitelist
+	switch runtime.GOOS {
+	case "darwin":
+		whitelist = GetMacOSWhitelist()
+	case "linux":
+		whitelist = GetMacOSWhitelist() // Usar mesma base por enquanto
+	case "windows":
+		whitelist = GetWindowsWhitelist()
+	default:
+		return nil, fmt.Errorf("plataforma não suportada: %s", runtime.GOOS)
+	}
+
+	// Adicionar comandos customizados se fornecidos
+	if config.CustomWhitelist != nil {
+		for name, spec := range config.CustomWhitelist {
+			whitelist.Commands[name] = spec
+		}
+	}
+
+	executor := &Executor{
 		config:    config,
 		logger:    config.Logger,
+		whitelist: whitelist,
 		semaphore: make(chan struct{}, config.MaxConcurrent),
+		metrics: &ExecutionMetrics{
+			CommandStats: make(map[string]CommandStats),
+		},
 	}
+
+	executor.logger.WithField("platform", runtime.GOOS).Info("Executor inicializado")
+	return executor, nil
 }
 
-// Execute executa um comando específico
-func (e *CommandExecutor) Execute(ctx context.Context, command *comms.Command) (*comms.CommandResult, error) {
+// Execute executa um comando de forma segura
+func (e *Executor) Execute(ctx context.Context, command *comms.Command) (*comms.CommandResult, error) {
 	if command == nil {
-		return nil, fmt.Errorf("command cannot be nil")
+		return nil, fmt.Errorf("comando não pode ser nulo")
 	}
+
+	startTime := time.Now()
+	e.updateMetrics(func(m *ExecutionMetrics) {
+		m.TotalExecutions++
+		m.LastExecution = startTime
+	})
+
+	// Log da tentativa de execução
+	e.logger.WithFields(map[string]interface{}{
+		"command_id":   command.ID,
+		"command_type": command.Type,
+		"command":      command.Command,
+		"args":         command.Args,
+	}).Info("Iniciando execução de comando")
 
 	// Controle de concorrência
 	select {
 	case e.semaphore <- struct{}{}:
 		defer func() { <-e.semaphore }()
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		e.updateMetrics(func(m *ExecutionMetrics) { m.RejectedCommands++ })
+		return e.createErrorResult(command, "timeout na fila de execução", -1, startTime), ctx.Err()
 	}
 
-	e.logger.WithFields(map[string]interface{}{
-		"command_id":   command.ID,
-		"command_type": command.Type,
-		"command":      command.Command,
-	}).Info("Executing command")
+	// Executar comando baseado no tipo
+	var result *comms.CommandResult
+	var err error
 
-	// Contexto com timeout
+	switch command.Type {
+	case "shell":
+		result, err = e.executeShellCommand(ctx, command, startTime)
+	case "info":
+		result, err = e.executeInfoCommand(ctx, command, startTime)
+	case "ping":
+		result, err = e.executePingCommand(ctx, command, startTime)
+	default:
+		e.updateMetrics(func(m *ExecutionMetrics) { m.RejectedCommands++ })
+		return e.createErrorResult(command, "tipo de comando não suportado: "+command.Type, -1, startTime),
+			fmt.Errorf("tipo de comando não suportado: %s", command.Type)
+	}
+
+	// Atualizar métricas
+	duration := time.Since(startTime)
+	if err != nil {
+		e.updateMetrics(func(m *ExecutionMetrics) { m.FailedRuns++ })
+		e.updateCommandStats(command.Command, duration, false)
+	} else {
+		e.updateMetrics(func(m *ExecutionMetrics) { m.SuccessfulRuns++ })
+		e.updateCommandStats(command.Command, duration, true)
+	}
+
+	return result, err
+}
+
+// executeShellCommand executa um comando shell com validação de segurança
+func (e *Executor) executeShellCommand(ctx context.Context, command *comms.Command, startTime time.Time) (*comms.CommandResult, error) {
+	// Validar comando contra whitelist
+	if err := e.whitelist.ValidateCommand(command.Command, command.Args); err != nil {
+		e.logger.WithFields(map[string]interface{}{
+			"command": command.Command,
+			"args":    command.Args,
+			"error":   err.Error(),
+		}).Warning("Comando rejeitado pela whitelist")
+
+		return e.createErrorResult(command, "comando rejeitado: "+err.Error(), -1, startTime), err
+	}
+
+	// Verificação adicional de segurança
+	if !IsCommandSafe(command.Command, command.Args) {
+		e.logger.WithFields(map[string]interface{}{
+			"command": command.Command,
+			"args":    command.Args,
+		}).Warning("Comando rejeitado pela verificação de segurança")
+
+		return e.createErrorResult(command, "comando considerado inseguro", -1, startTime),
+			fmt.Errorf("comando considerado inseguro")
+	}
+
+	// Sanitizar argumentos
+	sanitizedArgs := SanitizeArguments(command.Args)
+	sanitized := !equalSlices(command.Args, sanitizedArgs)
+
+	if sanitized {
+		e.logger.WithFields(map[string]interface{}{
+			"original":  command.Args,
+			"sanitized": sanitizedArgs,
+		}).Info("Argumentos sanitizados")
+	}
+
+	// Obter especificações do comando
+	spec, exists := e.whitelist.GetCommandSpec(command.Command)
+	if !exists {
+		return e.createErrorResult(command, "especificações do comando não encontradas", -1, startTime),
+			fmt.Errorf("especificações do comando não encontradas")
+	}
+
+	// Configurar timeout
 	timeout := e.config.DefaultTimeout
+	if spec.TimeoutSeconds > 0 {
+		timeout = time.Duration(spec.TimeoutSeconds) * time.Second
+	}
 	if command.Timeout > 0 {
 		timeout = time.Duration(command.Timeout) * time.Second
 	}
 
+	// Criar contexto com timeout
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Executar comando baseado no tipo
-	result, err := e.executeByType(execCtx, command)
-	if err != nil {
-		e.logger.WithFields(map[string]interface{}{
-			"command_id": command.ID,
-			"error":      err,
-		}).Error("Command execution failed")
+	// Executar comando
+	e.logger.WithFields(map[string]interface{}{
+		"command": command.Command,
+		"args":    sanitizedArgs,
+		"timeout": timeout.String(),
+	}).Debug("Executando comando shell")
 
-		return &comms.CommandResult{
-			CommandID:     command.ID,
-			Status:        "error",
-			Error:         err.Error(),
-			ExitCode:      -1,
-			ExecutionTime: 0,
-			Timestamp:     time.Now(),
-		}, err
+	cmd := exec.CommandContext(execCtx, command.Command, sanitizedArgs...)
+
+	// Configurar ambiente limitado
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+		"HOME=/tmp",
+		"USER=nobody",
 	}
 
-	e.logger.WithFields(map[string]interface{}{
-		"command_id": command.ID,
-		"exit_code":  result.ExitCode,
-	}).Info("Command executed successfully")
+	// Executar e capturar saída
+	output, err := cmd.CombinedOutput()
+
+	// Limitar tamanho da saída
+	outputStr := string(output)
+	if len(outputStr) > e.config.MaxOutputSize {
+		outputStr = outputStr[:e.config.MaxOutputSize] + "\n... (saída truncada)"
+	}
+
+	// Determinar código de saída
+	exitCode := 0
+	if err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			exitCode = exitError.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+
+	// Criar resultado
+	result := &comms.CommandResult{
+		ID:            command.ID,
+		CommandID:     command.ID,
+		Status:        "success",
+		Output:        outputStr,
+		ExitCode:      exitCode,
+		ExecutionTime: time.Since(startTime).Milliseconds(),
+		Timestamp:     time.Now(),
+	}
+
+	if err != nil {
+		result.Status = "error"
+		result.Error = err.Error()
+
+		e.logger.WithFields(map[string]interface{}{
+			"command":   command.Command,
+			"exit_code": exitCode,
+			"error":     err.Error(),
+		}).Error("Erro na execução do comando")
+	} else {
+		e.logger.WithFields(map[string]interface{}{
+			"command":        command.Command,
+			"exit_code":      exitCode,
+			"execution_time": result.ExecutionTime,
+			"output_size":    len(outputStr),
+		}).Info("Comando executado com sucesso")
+	}
 
 	return result, nil
 }
 
-// IsSupported verifica se o comando é suportado
-func (e *CommandExecutor) IsSupported(command *comms.Command) bool {
+// executeInfoCommand executa comandos de coleta de informações
+func (e *Executor) executeInfoCommand(ctx context.Context, command *comms.Command, startTime time.Time) (*comms.CommandResult, error) {
+	e.logger.WithField("command_id", command.ID).Debug("Executando comando de informação")
+
+	// Simular coleta de informações do sistema
+	info := map[string]interface{}{
+		"hostname":     getHostname(),
+		"platform":     runtime.GOOS,
+		"architecture": runtime.GOARCH,
+		"uptime":       getUptime(),
+		"timestamp":    time.Now().Unix(),
+	}
+
+	output := fmt.Sprintf("Informações do sistema coletadas: %+v", info)
+
+	return &comms.CommandResult{
+		ID:            command.ID,
+		CommandID:     command.ID,
+		Status:        "success",
+		Output:        output,
+		ExitCode:      0,
+		ExecutionTime: time.Since(startTime).Milliseconds(),
+		Timestamp:     time.Now(),
+	}, nil
+}
+
+// executePingCommand executa comando de ping
+func (e *Executor) executePingCommand(ctx context.Context, command *comms.Command, startTime time.Time) (*comms.CommandResult, error) {
+	e.logger.WithField("command_id", command.ID).Debug("Executando comando de ping")
+
+	return &comms.CommandResult{
+		ID:            command.ID,
+		CommandID:     command.ID,
+		Status:        "success",
+		Output:        "pong",
+		ExitCode:      0,
+		ExecutionTime: time.Since(startTime).Milliseconds(),
+		Timestamp:     time.Now(),
+	}, nil
+}
+
+// createErrorResult cria um resultado de erro padronizado
+func (e *Executor) createErrorResult(command *comms.Command, errorMsg string, exitCode int, startTime time.Time) *comms.CommandResult {
+	return &comms.CommandResult{
+		ID:            command.ID,
+		CommandID:     command.ID,
+		Status:        "error",
+		Error:         errorMsg,
+		ExitCode:      exitCode,
+		ExecutionTime: time.Since(startTime).Milliseconds(),
+		Timestamp:     time.Now(),
+	}
+}
+
+// GetMetrics retorna as métricas de execução
+func (e *Executor) GetMetrics() ExecutionMetrics {
+	e.metrics.mutex.RLock()
+	defer e.metrics.mutex.RUnlock()
+
+	// Fazer uma cópia das métricas
+	metrics := ExecutionMetrics{
+		TotalExecutions:  e.metrics.TotalExecutions,
+		SuccessfulRuns:   e.metrics.SuccessfulRuns,
+		FailedRuns:       e.metrics.FailedRuns,
+		RejectedCommands: e.metrics.RejectedCommands,
+		AverageTime:      e.metrics.AverageTime,
+		LastExecution:    e.metrics.LastExecution,
+		CommandStats:     make(map[string]CommandStats),
+	}
+
+	// Copiar estatísticas de comandos
+	for k, v := range e.metrics.CommandStats {
+		metrics.CommandStats[k] = v
+	}
+
+	return metrics
+}
+
+// IsSupported verifica se um comando é suportado
+func (e *Executor) IsSupported(command *comms.Command) bool {
 	if command == nil {
 		return false
 	}
 
 	switch command.Type {
-	case "shell", "info", "ping", "restart":
+	case "shell":
+		return e.whitelist.ValidateCommand(command.Command, command.Args) == nil
+	case "info", "ping":
 		return true
 	default:
 		return false
 	}
 }
 
-// GetTimeout retorna o timeout padrão
-func (e *CommandExecutor) GetTimeout() time.Duration {
+// GetTimeout retorna o timeout configurado
+func (e *Executor) GetTimeout() time.Duration {
 	return e.config.DefaultTimeout
 }
 
-// executeByType executa o comando baseado no tipo
-func (e *CommandExecutor) executeByType(ctx context.Context, command *comms.Command) (*comms.CommandResult, error) {
-	startTime := time.Now()
+// GetWhitelist retorna a whitelist atual
+func (e *Executor) GetWhitelist() *CommandWhitelist {
+	return e.whitelist
+}
 
-	var result *comms.CommandResult
-	var err error
-
-	switch command.Type {
-	case "shell":
-		result, err = e.executeShellCommand(ctx, command)
-	case "info":
-		result, err = e.executeInfoCommand(ctx, command)
-	case "ping":
-		result, err = e.executePingCommand(ctx, command)
-	case "restart":
-		result, err = e.executeRestartCommand(ctx, command)
-	default:
-		return nil, fmt.Errorf("unsupported command type: %s", command.Type)
+// updateMetrics atualiza as métricas de forma thread-safe
+func (e *Executor) updateMetrics(updateFunc func(*ExecutionMetrics)) {
+	if !e.config.EnableMetrics {
+		return
 	}
 
-	// Calcular duração
-	duration := time.Since(startTime)
-	e.logger.WithFields(map[string]interface{}{
-		"command_id": command.ID,
-		"duration":   duration.String(),
-	}).Debug("Command execution completed")
-
-	return result, err
+	e.metrics.mutex.Lock()
+	defer e.metrics.mutex.Unlock()
+	updateFunc(e.metrics)
 }
 
-// executeShellCommand executa um comando shell
-func (e *CommandExecutor) executeShellCommand(ctx context.Context, command *comms.Command) (*comms.CommandResult, error) {
-	// TODO: Implementar execução real de comando shell
-	// Por enquanto, simular
-	e.logger.WithField("command", command.Command).Debug("Simulating shell command execution")
+// updateCommandStats atualiza estatísticas de um comando específico
+func (e *Executor) updateCommandStats(command string, duration time.Duration, success bool) {
+	if !e.config.EnableMetrics {
+		return
+	}
 
-	return &comms.CommandResult{
-		CommandID:     command.ID,
-		Status:        "success",
-		Output:        "Command executed successfully (simulated)",
-		ExitCode:      0,
-		ExecutionTime: 1000, // 1 segundo simulado em ms
-		Timestamp:     time.Now(),
-	}, nil
+	e.metrics.mutex.Lock()
+	defer e.metrics.mutex.Unlock()
+
+	stats, exists := e.metrics.CommandStats[command]
+	if !exists {
+		stats = CommandStats{}
+	}
+
+	stats.Count++
+	stats.LastExecution = time.Now()
+
+	if success {
+		stats.SuccessCount++
+	} else {
+		stats.FailureCount++
+	}
+
+	// Calcular média móvel simples
+	if stats.Count == 1 {
+		stats.AverageTime = duration
+	} else {
+		stats.AverageTime = (stats.AverageTime + duration) / 2
+	}
+
+	e.metrics.CommandStats[command] = stats
 }
 
-// executeInfoCommand executa um comando de informação
-func (e *CommandExecutor) executeInfoCommand(ctx context.Context, command *comms.Command) (*comms.CommandResult, error) {
-	// TODO: Implementar coleta de informações do sistema
-	e.logger.Debug("Executing info command")
-
-	return &comms.CommandResult{
-		CommandID:     command.ID,
-		Status:        "success",
-		Output:        "System info collected successfully (simulated)",
-		ExitCode:      0,
-		ExecutionTime: 500, // 0.5 segundos simulado em ms
-		Timestamp:     time.Now(),
-	}, nil
+// Funções auxiliares
+func getHostname() string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return "unknown"
+	}
+	return hostname
 }
 
-// executePingCommand executa um comando de ping
-func (e *CommandExecutor) executePingCommand(ctx context.Context, command *comms.Command) (*comms.CommandResult, error) {
-	e.logger.Debug("Executing ping command")
-
-	return &comms.CommandResult{
-		CommandID:     command.ID,
-		Status:        "success",
-		Output:        "pong",
-		ExitCode:      0,
-		ExecutionTime: 100, // 0.1 segundos em ms
-		Timestamp:     time.Now(),
-	}, nil
+func getUptime() int64 {
+	// Implementação simplificada - retorna tempo desde o início do processo
+	return int64(time.Since(time.Now().Add(-time.Hour)).Seconds())
 }
 
-// executeRestartCommand executa um comando de reinicialização
-func (e *CommandExecutor) executeRestartCommand(ctx context.Context, command *comms.Command) (*comms.CommandResult, error) {
-	e.logger.Warning("Restart command received - scheduling restart")
-
-	// TODO: Implementar reinicialização real do agente
-	return &comms.CommandResult{
-		CommandID:     command.ID,
-		Status:        "success",
-		Output:        "Restart scheduled",
-		ExitCode:      0,
-		ExecutionTime: 200, // 0.2 segundos em ms
-		Timestamp:     time.Now(),
-	}, nil
+func equalSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

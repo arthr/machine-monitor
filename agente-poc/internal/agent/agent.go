@@ -92,7 +92,7 @@ type Agent struct {
 	logger         logging.Logger
 	collector      *collector.SystemCollector
 	comms          *comms.Manager
-	executor       executor.Executor
+	executor       *executor.Executor
 	ctx            context.Context
 	cancel         context.CancelFunc
 	wg             sync.WaitGroup
@@ -197,7 +197,12 @@ func (a *Agent) Start() error {
 		MaxConcurrent:  10,
 		Logger:         a.logger,
 	}
-	a.executor = executor.New(execConfig)
+	var err error
+	a.executor, err = executor.New(execConfig)
+	if err != nil {
+		a.setState(StateError)
+		return fmt.Errorf("failed to initialize executor: %w", err)
+	}
 
 	// Inicializar communications manager
 	commConfig := &comms.Config{
@@ -210,7 +215,6 @@ func (a *Agent) Start() error {
 		Logger:            a.logger,
 	}
 
-	var err error
 	a.comms, err = comms.New(commConfig)
 	if err != nil {
 		a.setState(StateError)
