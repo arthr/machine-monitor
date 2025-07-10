@@ -163,6 +163,34 @@ func (a *Agent) Start() error {
 	// Inicializar collector
 	a.collector = collector.New(a.config.CollectionInterval, a.logger)
 
+	// Gerar machine_id automaticamente se não fornecido na configuração
+	if a.config.MachineID == "" {
+		a.logger.Info("Machine ID not provided in config, generating automatically...")
+
+		// Coletar dados básicos para gerar machine_id
+		inventory, err := a.collector.CollectInventory()
+		if err != nil {
+			a.logger.Warning("Failed to collect inventory for machine ID generation, using fallback: %v", err)
+
+			// Fallback: usar informações básicas do sistema
+			basicInfo, err := a.collector.CollectBasicInfo()
+			if err != nil {
+				a.setState(StateError)
+				return fmt.Errorf("failed to generate machine ID: %w", err)
+			}
+
+			// Usar hostname como machine_id de fallback
+			a.config.MachineID = fmt.Sprintf("auto-%s", basicInfo.Hostname)
+		} else {
+			// Usar machine_id gerado pelo collector
+			a.config.MachineID = inventory.MachineID
+		}
+
+		a.logger.Info("Generated machine ID: %s", a.config.MachineID)
+	} else {
+		a.logger.Info("Using configured machine ID: %s", a.config.MachineID)
+	}
+
 	// Inicializar executor
 	execConfig := &executor.Config{
 		DefaultTimeout: a.config.CommandTimeout,
@@ -173,12 +201,13 @@ func (a *Agent) Start() error {
 
 	// Inicializar communications manager
 	commConfig := &comms.Config{
-		BackendURL:    a.config.BackendURL,
-		WebSocketURL:  a.config.WebSocketURL,
-		Token:         a.config.Token,
-		MachineID:     a.config.MachineID,
-		RetryInterval: a.config.RetryInterval,
-		Logger:        a.logger,
+		BackendURL:        a.config.BackendURL,
+		WebSocketURL:      a.config.WebSocketURL,
+		Token:             a.config.Token,
+		MachineID:         a.config.MachineID,
+		RetryInterval:     a.config.RetryInterval,
+		HeartbeatInterval: a.config.HeartbeatInterval,
+		Logger:            a.logger,
 	}
 
 	var err error
@@ -334,8 +363,9 @@ func (a *Agent) runMainLoop() {
 
 	a.logger.Info("Starting main loop...")
 
-	heartbeatTicker := time.NewTicker(a.config.HeartbeatInterval)
-	defer heartbeatTicker.Stop()
+	// Remover heartbeat daqui pois o manager já tem seu próprio timer
+	// heartbeatTicker := time.NewTicker(a.config.HeartbeatInterval)
+	// defer heartbeatTicker.Stop()
 
 	healthCheckTicker := time.NewTicker(10 * time.Second)
 	defer healthCheckTicker.Stop()
@@ -345,8 +375,8 @@ func (a *Agent) runMainLoop() {
 		case <-a.ctx.Done():
 			a.logger.Info("Main loop stopped")
 			return
-		case <-heartbeatTicker.C:
-			a.sendHeartbeatWithRetry()
+		// case <-heartbeatTicker.C:
+		// 	a.sendHeartbeatWithRetry()
 		case <-healthCheckTicker.C:
 			a.updateHealthStatus()
 		}
@@ -399,8 +429,11 @@ func (a *Agent) collectAndSendInventory() {
 		return
 	}
 
-	// Definir machine_id
-	data.MachineID = a.config.MachineID
+	// Usar machine_id da configuração (que já foi resolvido no Start)
+	// Se o inventory não tiver machine_id, usar o da configuração
+	if data.MachineID == "" {
+		data.MachineID = a.config.MachineID
+	}
 
 	// Enviar dados via communications
 	if err := a.sendInventoryWithRetry(data); err != nil {
@@ -416,35 +449,6 @@ func (a *Agent) collectAndSendInventory() {
 	a.metrics.mu.Unlock()
 
 	a.logger.Debug("Inventory sent successfully")
-}
-
-// sendHeartbeatWithRetry envia heartbeat com retry
-func (a *Agent) sendHeartbeatWithRetry() {
-	if !a.circuitBreaker.canExecute() {
-		a.logger.Warning("Circuit breaker is open, skipping heartbeat")
-		return
-	}
-
-	err := a.retryWithBackoff(func() error {
-		return a.comms.SendHeartbeat()
-	})
-
-	if err != nil {
-		a.logger.WithField("error", err).Error("Failed to send heartbeat after retries")
-		a.circuitBreaker.recordFailure()
-		a.errorChan <- err
-		return
-	}
-
-	a.circuitBreaker.recordSuccess()
-
-	// Atualizar métricas
-	a.metrics.mu.Lock()
-	a.metrics.HeartbeatCount++
-	a.metrics.LastHeartbeat = time.Now()
-	a.metrics.mu.Unlock()
-
-	a.logger.Debug("Heartbeat sent successfully")
 }
 
 // sendInventoryWithRetry envia inventário com retry

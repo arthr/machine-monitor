@@ -64,6 +64,12 @@ type Manager struct {
 	// Heartbeat control
 	lastHeartbeat  time.Time
 	heartbeatMutex sync.RWMutex
+
+	// System data cache (para consistência entre heartbeat e inventory)
+	systemDataMutex  sync.RWMutex
+	actualMachineID  string
+	actualHostname   string
+	lastSystemUpdate time.Time
 }
 
 // ManagerMetrics tracks manager-level metrics
@@ -142,14 +148,16 @@ func New(config *Config) (*Manager, error) {
 
 	// Create WebSocket client
 	wsClient := NewWebSocketClient(WebSocketConfig{
-		URL:            config.WebSocketURL,
-		Token:          config.Token,
-		ReconnectDelay: config.WSReconnectDelay,
-		MaxReconnects:  config.WSMaxReconnects,
-		PingInterval:   config.WSPingInterval,
-		PongTimeout:    config.WSPongTimeout,
-		MaxQueueSize:   config.WSMaxQueueSize,
-		Logger:         config.Logger,
+		URL:                  config.WebSocketURL,
+		Token:                config.Token,
+		MachineID:            config.MachineID, // Inicialmente usar config, será atualizado depois
+		ReconnectDelay:       config.WSReconnectDelay,
+		MaxReconnects:        config.WSMaxReconnects,
+		PingInterval:         config.WSPingInterval,
+		PongTimeout:          config.WSPongTimeout,
+		MaxQueueSize:         config.WSMaxQueueSize,
+		Logger:               config.Logger,
+		SystemHealthCallback: nil, // Será definido após criação do manager
 	})
 
 	manager := &Manager{
@@ -166,6 +174,9 @@ func New(config *Config) (*Manager, error) {
 		commandChan: make(chan Command, 100),
 		resultChan:  make(chan CommandResult, 100),
 	}
+
+	// Definir callback de sistema health para o WebSocket client
+	wsClient.systemHealthCallback = manager.getSystemHealth
 
 	return manager, nil
 }
@@ -187,6 +198,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	go m.startWebSocketConnection()
 
 	// Start heartbeat
+	m.logger.Debug("Starting heartbeat goroutine")
 	go m.startHeartbeat()
 
 	// Start command processing
@@ -273,8 +285,9 @@ func (m *Manager) startWebSocketConnection() {
 			m.logger.Info("WebSocket connected successfully")
 
 			// Registrar máquina no WebSocket - formato simples esperado pelo backend
+			actualMachineID := m.getActualMachineID()
 			registrationData := map[string]interface{}{
-				"machine_id": m.config.MachineID,
+				"machine_id": actualMachineID,
 			}
 
 			// Serializar e enviar registro
@@ -282,7 +295,7 @@ func (m *Manager) startWebSocketConnection() {
 				if err := m.wsClient.conn.WriteMessage(websocket.TextMessage, regBytes); err != nil {
 					m.logger.Error("Failed to register WebSocket: %v", err)
 				} else {
-					m.logger.Info("WebSocket registration sent for machine: %s", m.config.MachineID)
+					m.logger.Info("WebSocket registration sent for machine: %s", actualMachineID)
 				}
 			}
 
@@ -345,13 +358,19 @@ func (m *Manager) SendHeartbeat() error {
 	m.heartbeatMutex.Lock()
 	defer m.heartbeatMutex.Unlock()
 
-	m.logger.Debug("Sending heartbeat for machine: %s", m.config.MachineID)
+	// Usar dados reais do sistema (consistente com inventory)
+	actualMachineID := m.getActualMachineID()
+	actualHostname := m.getActualHostname()
+
+	// Debug detalhado para identificar duplicação
+	m.logger.Debug("SendHeartbeat called for machine: %s [TID: %d]", actualMachineID, time.Now().UnixNano())
 
 	// Get system health info
 	healthStatus := m.getSystemHealth()
 
 	heartbeat := map[string]interface{}{
-		"machine_id":       m.config.MachineID,
+		"machine_id":       actualMachineID,
+		"hostname":         actualHostname,
 		"timestamp":        time.Now(),
 		"status":           "online",
 		"agent_version":    "1.0.0",
@@ -384,6 +403,9 @@ func (m *Manager) SendHeartbeat() error {
 // SendInventory envia dados de inventário para o backend
 func (m *Manager) SendInventory(data *collector.InventoryData) error {
 	m.logger.WithField("machine_id", data.MachineID).Debug("Sending inventory data...")
+
+	// Atualizar dados do sistema para consistência entre heartbeat e inventory
+	m.UpdateSystemData(data.MachineID, data.System.Hostname)
 
 	// Calculate checksum
 	dataBytes, err := json.Marshal(data)
@@ -469,11 +491,12 @@ func (m *Manager) sendResultViaHTTP(result *CommandResult) error {
 
 // RegisterMachine registra a máquina no backend
 func (m *Manager) RegisterMachine() error {
-	m.logger.WithField("machine_id", m.config.MachineID).Info("Registering machine...")
+	actualMachineID := m.getActualMachineID()
+	m.logger.WithField("machine_id", actualMachineID).Info("Registering machine...")
 
 	// Create registration request
 	regRequest := RegistrationRequest{
-		MachineID:    m.config.MachineID,
+		MachineID:    actualMachineID,
 		Token:        m.config.Token,
 		AgentVersion: "1.0.0",
 		Timestamp:    time.Now(),
@@ -521,11 +544,15 @@ func (m *Manager) startHeartbeat() {
 	ticker := time.NewTicker(m.config.HeartbeatInterval)
 	defer ticker.Stop()
 
+	m.logger.Debug("Heartbeat routine started with interval: %v", m.config.HeartbeatInterval)
+
 	for {
 		select {
 		case <-m.ctx.Done():
+			m.logger.Debug("Heartbeat routine stopped by context")
 			return
 		case <-ticker.C:
+			m.logger.Debug("Heartbeat ticker triggered - calling SendHeartbeat")
 			if err := m.SendHeartbeat(); err != nil {
 				m.logger.Error("Failed to send heartbeat: %v", err)
 			}
@@ -584,7 +611,7 @@ func (m *Manager) handleStatusRequest(msg WebSocketMessage) {
 	m.logger.Debug("Received status request")
 
 	status := StatusUpdate{
-		MachineID: m.config.MachineID,
+		MachineID: m.getActualMachineID(),
 		Status:    m.metrics.ConnectionStatus,
 		Message:   fmt.Sprintf("Uptime: %v", time.Since(m.metrics.StartTime)),
 		Timestamp: time.Now(),
@@ -618,6 +645,45 @@ func (m *Manager) IsRunning() bool {
 	m.runningMutex.RLock()
 	defer m.runningMutex.RUnlock()
 	return m.running
+}
+
+// UpdateSystemData atualiza os dados do sistema cache para consistência
+func (m *Manager) UpdateSystemData(machineID, hostname string) {
+	m.systemDataMutex.Lock()
+	defer m.systemDataMutex.Unlock()
+
+	if machineID != "" {
+		m.actualMachineID = machineID
+		// Atualizar machine_id do WebSocket client também
+		m.wsClient.UpdateMachineID(machineID)
+	}
+	if hostname != "" {
+		m.actualHostname = hostname
+	}
+	m.lastSystemUpdate = time.Now()
+
+	m.logger.Debug("System data updated: machine_id=%s, hostname=%s", m.actualMachineID, m.actualHostname)
+}
+
+// getActualMachineID retorna o machine_id real (gerado) ou fallback para config se não disponível
+func (m *Manager) getActualMachineID() string {
+	m.systemDataMutex.RLock()
+	defer m.systemDataMutex.RUnlock()
+
+	if m.actualMachineID != "" {
+		return m.actualMachineID
+	}
+
+	// Fallback para config se dados do sistema não estão disponíveis ainda
+	return m.config.MachineID
+}
+
+// getActualHostname retorna o hostname real do sistema
+func (m *Manager) getActualHostname() string {
+	m.systemDataMutex.RLock()
+	defer m.systemDataMutex.RUnlock()
+
+	return m.actualHostname
 }
 
 // IsConnected returns if the manager is connected

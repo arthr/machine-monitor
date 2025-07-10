@@ -149,13 +149,30 @@ function handleLegacyCommandResult(message, machineId) {
  * Processar ping
  */
 function handlePing(ws, message) {
-	logger.websocket("🏓 Ping recebido, enviando pong");
+	// Extrair dados estruturados do ping se disponíveis
+	const pingData = message.data || {};
+
+	logger.websocket("🏓 Ping estruturado recebido", {
+		machine_id: pingData.machine_id,
+		status: pingData.status,
+		agent_version: pingData.agent_version,
+		system_health: pingData.system_health,
+	});
+
+	// Responder com pong estruturado
+	const pongData = {
+		server_time: new Date().toISOString(),
+		server_status: "online",
+		processed_ping: message.id,
+		machine_id: pingData.machine_id,
+	};
 
 	ws.send(
 		JSON.stringify({
 			type: "pong",
 			id: message.id,
 			timestamp: new Date().toISOString(),
+			data: pongData,
 		})
 	);
 }
@@ -164,7 +181,25 @@ function handlePing(ws, message) {
  * Processar pong
  */
 function handlePong(message, machineId) {
-	logger.websocket(`🏓 Pong recebido de ${machineId}`);
+	// Extrair dados estruturados do pong se disponíveis
+	const pongData = message.data || {};
+
+	logger.websocket(`🏓 Pong estruturado recebido de ${machineId}`, {
+		status: pongData.status,
+		agent_version: pongData.agent_version,
+		ping_id: pongData.ping_id,
+		system_health: pongData.system_health,
+	});
+
+	// Atualizar dados da máquina com informações do pong se disponíveis
+	if (pongData.machine_id && pongData.status) {
+		storage.setMachine(pongData.machine_id, {
+			status: pongData.status,
+			agent_version: pongData.agent_version,
+			system_health: pongData.system_health,
+			last_ping: new Date().toISOString(),
+		});
+	}
 }
 
 /**

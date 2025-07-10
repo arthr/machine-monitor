@@ -1,7 +1,7 @@
 {
   "machine_id": "mac-dev-001",
-  "backend_url": "http://localhost:3000",
-  "websocket_url": "ws://localhost:3000/ws",
+  "backend_url": "http://localhost:8080",
+  "websocket_url": "ws://localhost:8080",
   "token": "dev-token-123",
   "heartbeat_interval": 30,
   "collection_interval": 60,

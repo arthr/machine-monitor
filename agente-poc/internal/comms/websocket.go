@@ -18,9 +18,13 @@ import (
 type WebSocketClient struct {
 	url       string
 	token     string
+	machineID string
 	conn      *websocket.Conn
 	connMutex sync.RWMutex
 	logger    logging.Logger
+
+	// System health callback
+	systemHealthCallback func() map[string]interface{}
 
 	// Channels
 	commandChan chan Command
@@ -69,14 +73,16 @@ type WebSocketMetrics struct {
 
 // WebSocketConfig configuration for WebSocket client
 type WebSocketConfig struct {
-	URL            string
-	Token          string
-	ReconnectDelay time.Duration
-	MaxReconnects  int
-	PingInterval   time.Duration
-	PongTimeout    time.Duration
-	MaxQueueSize   int
-	Logger         logging.Logger
+	URL                  string
+	Token                string
+	MachineID            string
+	ReconnectDelay       time.Duration
+	MaxReconnects        int
+	PingInterval         time.Duration
+	PongTimeout          time.Duration
+	MaxQueueSize         int
+	Logger               logging.Logger
+	SystemHealthCallback func() map[string]interface{}
 }
 
 // NewWebSocketClient creates a new WebSocket client
@@ -84,21 +90,23 @@ func NewWebSocketClient(config WebSocketConfig) *WebSocketClient {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &WebSocketClient{
-		url:            config.URL,
-		token:          config.Token,
-		logger:         config.Logger,
-		commandChan:    make(chan Command, 100),
-		messageChan:    make(chan WebSocketMessage, 100),
-		closeChan:      make(chan struct{}),
-		reconnectDelay: config.ReconnectDelay,
-		maxReconnects:  config.MaxReconnects,
-		pingInterval:   config.PingInterval,
-		pongTimeout:    config.PongTimeout,
-		ctx:            ctx,
-		cancel:         cancel,
-		metrics:        &WebSocketMetrics{},
-		messageQueue:   make([]WebSocketMessage, 0),
-		maxQueueSize:   config.MaxQueueSize,
+		url:                  config.URL,
+		token:                config.Token,
+		machineID:            config.MachineID,
+		logger:               config.Logger,
+		systemHealthCallback: config.SystemHealthCallback,
+		commandChan:          make(chan Command, 100),
+		messageChan:          make(chan WebSocketMessage, 100),
+		closeChan:            make(chan struct{}),
+		reconnectDelay:       config.ReconnectDelay,
+		maxReconnects:        config.MaxReconnects,
+		pingInterval:         config.PingInterval,
+		pongTimeout:          config.PongTimeout,
+		ctx:                  ctx,
+		cancel:               cancel,
+		metrics:              &WebSocketMetrics{},
+		messageQueue:         make([]WebSocketMessage, 0),
+		maxQueueSize:         config.MaxQueueSize,
 	}
 }
 
@@ -311,22 +319,57 @@ func (ws *WebSocketClient) handleCommand(message WebSocketMessage) {
 
 // handlePingMessage handles ping messages
 func (ws *WebSocketClient) handlePingMessage(message WebSocketMessage) {
-	ws.logger.Debug("Received ping")
+	ws.logger.Debug("Received structured ping")
 
-	// Send pong response
+	// Responder com pong estruturado incluindo dados de sistema
+	pongData := map[string]interface{}{
+		"machine_id":    ws.getMachineID(),
+		"status":        "online",
+		"agent_version": "1.0.0",
+		"timestamp":     time.Now(),
+		"ping_id":       message.ID,
+	}
+
+	// Se o ping contiver dados, extrair informações úteis
+	if message.Data != nil {
+		if pingData, ok := message.Data.(map[string]interface{}); ok {
+			if pingSeq, exists := pingData["ping_seq"]; exists {
+				pongData["ping_seq"] = pingSeq
+			}
+		}
+	}
+
 	pongMessage := WebSocketMessage{
 		Type:      "pong",
 		ID:        message.ID,
 		Timestamp: time.Now(),
+		Data:      pongData,
 	}
 
-	_ = ws.SendMessage(pongMessage)
+	if err := ws.SendMessage(pongMessage); err != nil {
+		ws.logger.Error("Error sending structured pong: %v", err)
+	} else {
+		ws.logger.Debug("Structured pong sent in response to ping")
+	}
 }
 
 // handlePongMessage handles pong messages
 func (ws *WebSocketClient) handlePongMessage(message WebSocketMessage) {
-	ws.logger.Debug("Received pong")
+	ws.logger.Debug("Received structured pong")
 	ws.metrics.PongsReceived++
+
+	// Processar dados estruturados do pong se disponíveis
+	if message.Data != nil {
+		if pongData, ok := message.Data.(map[string]interface{}); ok {
+			if machineID, exists := pongData["machine_id"]; exists {
+				ws.logger.Debug("Pong received from machine: %v", machineID)
+			}
+
+			if status, exists := pongData["status"]; exists {
+				ws.logger.Debug("Remote status: %v", status)
+			}
+		}
+	}
 }
 
 // handlePing sends periodic ping messages
@@ -342,15 +385,33 @@ func (ws *WebSocketClient) handlePing() {
 			return
 		case <-ticker.C:
 			if ws.isConnected() {
+				// Criar ping estruturado com dados de sistema
+				pingData := map[string]interface{}{
+					"machine_id":    ws.getMachineID(),
+					"status":        "online",
+					"agent_version": "1.0.0",
+					"timestamp":     time.Now(),
+					"ping_seq":      time.Now().UnixNano(),
+				}
+
+				// Adicionar dados de sistema health se callback disponível
+				if ws.systemHealthCallback != nil {
+					if systemHealth := ws.systemHealthCallback(); systemHealth != nil {
+						pingData["system_health"] = systemHealth
+					}
+				}
+
 				pingMessage := WebSocketMessage{
 					Type:      "ping",
 					ID:        fmt.Sprintf("ping_%d", time.Now().UnixNano()),
 					Timestamp: time.Now(),
+					Data:      pingData,
 				}
 
 				if err := ws.SendMessage(pingMessage); err != nil {
 					ws.logger.Error("Error sending ping: %v", err)
 				} else {
+					ws.logger.Debug("Structured ping sent with system data")
 					ws.metrics.PingsSent++
 				}
 			}
@@ -479,6 +540,19 @@ func (ws *WebSocketClient) GetMetrics() WebSocketMetrics {
 // ResetMetrics resets WebSocket metrics
 func (ws *WebSocketClient) ResetMetrics() {
 	ws.metrics = &WebSocketMetrics{}
+}
+
+// UpdateMachineID atualiza o machine_id do WebSocket client
+func (ws *WebSocketClient) UpdateMachineID(machineID string) {
+	if machineID != "" && machineID != ws.machineID {
+		ws.machineID = machineID
+		ws.logger.Debug("WebSocket machine_id updated to: %s", machineID)
+	}
+}
+
+// getMachineID returns the machine ID
+func (ws *WebSocketClient) getMachineID() string {
+	return ws.machineID
 }
 
 // Helper functions for parsing command data

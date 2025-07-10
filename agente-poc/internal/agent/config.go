@@ -88,9 +88,10 @@ func LoadConfig(path string) (*Config, error) {
 func (c *Config) Validate() error {
 	var errors []string
 
-	if c.MachineID == "" {
-		errors = append(errors, "machine_id é obrigatório")
-	}
+	// machine_id agora é opcional - será gerado automaticamente se não fornecido
+	// if c.MachineID == "" {
+	// 	errors = append(errors, "machine_id é obrigatório")
+	// }
 
 	if c.BackendURL == "" {
 		errors = append(errors, "backend_url é obrigatório")
