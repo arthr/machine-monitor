@@ -41,11 +41,11 @@ func NewWSClient(baseURL, apiKey, machineID string) *WSClient {
 	// Converte HTTP URL para WebSocket URL
 	wsURL := baseURL
 	if baseURL[:4] == "http" {
-		wsURL = "ws" + baseURL[4:]
+		wsURL = "ws" + baseURL[4:] + "/agent-ws"
 	}
 
 	return &WSClient{
-		url:               fmt.Sprintf("%s/ws/machine/%s", wsURL, machineID),
+		url:               wsURL,
 		apiKey:            apiKey,
 		machineID:         machineID,
 		commandChan:       make(chan types.Command, 100),

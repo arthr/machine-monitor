@@ -32,7 +32,7 @@ func NewHTTPClient(baseURL, apiKey string, timeout time.Duration) *HTTPClient {
 
 // RegisterMachine registra a máquina no backend
 func (h *HTTPClient) RegisterMachine(ctx context.Context, machineID string, inventory *types.Inventory) error {
-	url := fmt.Sprintf("%s/api/machines/register", h.baseURL)
+	url := fmt.Sprintf("%s/api/agentes/%s", h.baseURL, machineID)
 
 	payload := map[string]interface{}{
 		"machine_id": machineID,
@@ -44,25 +44,25 @@ func (h *HTTPClient) RegisterMachine(ctx context.Context, machineID string, inve
 
 // SendHeartbeat envia heartbeat para o backend
 func (h *HTTPClient) SendHeartbeat(ctx context.Context, heartbeat *types.HeartbeatData) error {
-	url := fmt.Sprintf("%s/api/machines/%s/heartbeat", h.baseURL, heartbeat.MachineID)
+	url := fmt.Sprintf("%s/api/agentes/%s/heartbeat", h.baseURL, heartbeat.MachineID)
 	return h.makeRequest(ctx, "POST", url, heartbeat, nil)
 }
 
 // SendInventory envia inventário para o backend
 func (h *HTTPClient) SendInventory(ctx context.Context, inventory *types.Inventory) error {
-	url := fmt.Sprintf("%s/api/machines/%s/inventory", h.baseURL, inventory.MachineID)
+	url := fmt.Sprintf("%s/api/agentes/%s/inventory", h.baseURL, inventory.MachineID)
 	return h.makeRequest(ctx, "POST", url, inventory, nil)
 }
 
 // SendCommandResult envia resultado de comando para o backend
 func (h *HTTPClient) SendCommandResult(ctx context.Context, machineID string, result *types.CommandResult) error {
-	url := fmt.Sprintf("%s/api/machines/%s/commands/%s/result", h.baseURL, machineID, result.ID)
+	url := fmt.Sprintf("%s/api/agentes/%s/commands/%s/result", h.baseURL, machineID, result.ID)
 	return h.makeRequest(ctx, "POST", url, result, nil)
 }
 
 // GetCommands obtém comandos pendentes do backend
 func (h *HTTPClient) GetCommands(ctx context.Context, machineID string) ([]types.Command, error) {
-	url := fmt.Sprintf("%s/api/machines/%s/commands", h.baseURL, machineID)
+	url := fmt.Sprintf("%s/api/agentes/%s/commands", h.baseURL, machineID)
 
 	var commands []types.Command
 	err := h.makeRequest(ctx, "GET", url, nil, &commands)
