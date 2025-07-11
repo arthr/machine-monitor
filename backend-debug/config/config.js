@@ -6,7 +6,7 @@ const path = require("path");
 
 module.exports = {
 	server: {
-		port: process.env.PORT || 8080,
+		port: process.env.PORT || 3000,
 		host: process.env.HOST || "localhost",
 	},
 
