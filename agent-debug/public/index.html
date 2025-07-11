@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Debug Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #0d1117;
+            color: #c9d1d9;
+            line-height: 1.6;
+        }
+
+        .header {
+            background: #161b22;
+            padding: 1rem 2rem;
+            border-bottom: 1px solid #30363d;
+            display: flex;
+            justify-content: between;
+            align-items: center;
+            gap: 2rem;
+        }
+
+        .header h1 {
+            color: #58a6ff;
+            font-size: 1.5rem;
+        }
+
+        .header .status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #238636;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .controls {
+            background: #161b22;
+            padding: 1rem 2rem;
+            border-bottom: 1px solid #30363d;
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            background: #238636;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: background-color 0.2s;
+        }
+
+        .btn:hover {
+            background: #2ea043;
+        }
+
+        .btn.danger {
+            background: #da3633;
+        }
+
+        .btn.danger:hover {
+            background: #f85149;
+        }
+
+        .filter-input {
+            background: #21262d;
+            border: 1px solid #30363d;
+            color: #c9d1d9;
+            padding: 0.5rem;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 300px;
+            height: calc(100vh - 140px);
+            gap: 1px;
+            background: #30363d;
+        }
+
+        .messages-panel {
+            background: #0d1117;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sidebar {
+            background: #161b22;
+            padding: 1rem;
+            overflow-y: auto;
+        }
+
+        .sidebar h3 {
+            color: #58a6ff;
+            margin-bottom: 1rem;
+            font-size: 1rem;
+        }
+
+        .stat-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #30363d;
+        }
+
+        .stat-item:last-child {
+            border-bottom: none;
+        }
+
+        .messages-header {
+            background: #161b22;
+            padding: 1rem;
+            border-bottom: 1px solid #30363d;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .messages-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1rem;
+        }
+
+        .message-item {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+            overflow: hidden;
+        }
+
+        .message-header {
+            background: #21262d;
+            padding: 0.75rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+        }
+
+        .message-header:hover {
+            background: #30363d;
+        }
+
+        .message-meta {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .method {
+            background: #238636;
+            color: white;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: bold;
+        }
+
+        .method.POST {
+            background: #1f6feb;
+        }
+
+        .method.GET {
+            background: #238636;
+        }
+
+        .method.DELETE {
+            background: #da3633;
+        }
+
+        .timestamp {
+            color: #7d8590;
+            font-size: 0.85rem;
+        }
+
+        .size {
+            color: #7d8590;
+            font-size: 0.85rem;
+        }
+
+        .message-content {
+            display: none;
+            padding: 1rem;
+            background: #0d1117;
+            border-top: 1px solid #30363d;
+        }
+
+        .message-content.expanded {
+            display: block;
+        }
+
+        .json-content {
+            background: #21262d;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 1rem;
+            overflow-x: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+            white-space: pre-wrap;
+        }
+
+        .machines-section {
+            margin-top: 2rem;
+        }
+
+        .machine-item {
+            background: #21262d;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 0.75rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .machine-id {
+            color: #58a6ff;
+            font-weight: bold;
+            font-size: 0.9rem;
+        }
+
+        .machine-info {
+            color: #7d8590;
+            font-size: 0.8rem;
+            margin-top: 0.25rem;
+        }
+
+        .auto-scroll {
+            background: #1f6feb;
+        }
+
+        .auto-scroll.active {
+            background: #238636;
+        }
+
+        @media (max-width: 768px) {
+            .main-content {
+                grid-template-columns: 1fr;
+                grid-template-rows: 1fr 300px;
+            }
+            
+            .controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🔍 Agent Debug Dashboard</h1>
+        <div class="status">
+            <div class="status-dot"></div>
+            <span id="connectionStatus">Conectado</span>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button class="btn" onclick="refreshData()">🔄 Atualizar</button>
+        <button class="btn danger" onclick="clearMessages()">🗑️ Limpar Mensagens</button>
+        <button class="btn auto-scroll" id="autoScrollBtn" onclick="toggleAutoScroll()">📜 Auto Scroll</button>
+        <input type="text" class="filter-input" id="filterInput" placeholder="Filtrar por endpoint..." onkeyup="filterMessages()">
+        <select class="filter-input" id="typeFilter" onchange="filterMessages()">
+            <option value="">Todos os tipos</option>
+            <option value="GET">GET</option>
+            <option value="POST">POST</option>
+            <option value="DELETE">DELETE</option>
+        </select>
+    </div>
+
+    <div class="main-content">
+        <div class="messages-panel">
+            <div class="messages-header">
+                <h2>📨 Mensagens (<span id="messageCount">0</span>)</h2>
+                <span id="lastUpdate">-</span>
+            </div>
+            <div class="messages-list" id="messagesList">
+                <div style="text-align: center; color: #7d8590; margin-top: 2rem;">
+                    Aguardando mensagens do agente...
+                </div>
+            </div>
+        </div>
+
+        <div class="sidebar">
+            <h3>📊 Estatísticas</h3>
+            <div id="statsContainer">
+                <div class="stat-item">
+                    <span>Total de Mensagens:</span>
+                    <span id="totalMessages">0</span>
+                </div>
+                <div class="stat-item">
+                    <span>Máquinas Ativas:</span>
+                    <span id="totalMachines">0</span>
+                </div>
+                <div class="stat-item">
+                    <span>Últimas 24h:</span>
+                    <span id="last24h">0</span>
+                </div>
+            </div>
+
+            <div class="machines-section">
+                <h3>🖥️ Máquinas</h3>
+                <div id="machinesContainer">
+                    <div style="text-align: center; color: #7d8590;">
+                        Nenhuma máquina registrada
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html> 
