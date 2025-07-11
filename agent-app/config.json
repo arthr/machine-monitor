@@ -1,0 +1,45 @@
+{
+  "server": {
+    "base_url": "http://localhost:3000",
+    "http_port": 3000,
+    "ws_port": 3000,
+    "use_https": false,
+    "timeout": 30,
+    "max_retries": 3,
+    "retry_delay": 5
+  },
+  "agent": {
+    "machine_id": "",
+    "name": "Machine Monitor Agent",
+    "version": "1.0.0",
+    "heartbeat_interval": 30,
+    "inventory_interval": 300,
+    "max_concurrency": 5,
+    "data_cache_ttl": 300
+  },
+  "logging": {
+    "level": "info",
+    "file": "logs/agent.log",
+    "max_size": 100,
+    "max_age": 7,
+    "compress": true
+  },
+  "ui": {
+    "show_tray_icon": true,
+    "webui_port": 8080,
+    "theme": "dark",
+    "auto_start": true
+  },
+  "security": {
+    "api_key": "",
+    "enable_tls": false,
+    "cert_file": "",
+    "key_file": "",
+    "validate_certs": true,
+    "allowed_commands": [
+      "ping",
+      "info",
+      "restart"
+    ]
+  }
+} 
